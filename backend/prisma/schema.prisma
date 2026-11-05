@@ -1,0 +1,572 @@
+// ============================================================================
+// Doyensys Customer Experience & ITSM Portal — Prisma schema
+// PostgreSQL 16, RLS enforced at DB layer (see prisma/rls-policies.sql)
+// and re-checked at the application query layer (see src/lib/tenantContext.ts)
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy & Identity
+// ---------------------------------------------------------------------------
+
+enum OrgType {
+  CUSTOMER
+  DOYENSYS
+}
+
+model Org {
+  id          String   @id @default(uuid())
+  name        String
+  type        OrgType
+  // Used only for cosmetic branding on the login page (which customer's
+  // logo/name to preview as someone types their email) — NEVER used to
+  // decide access. Access is always determined by the user's own orgId,
+  // set when their account is created. An email domain isn't proof of
+  // identity, so it must never be trusted for authorization.
+  emailDomain String?  @map("email_domain")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  users         User[]
+  projects      Project[]
+  tickets       Ticket[]
+  statusReports StatusReport[]
+  statusReportUploads StatusReportUpload[]
+  notifications Notification[]
+  settings      OrgSettings?
+
+  @@map("orgs")
+}
+
+model OrgSettings {
+  orgId              String  @id @map("org_id")
+  supportEmail       String? @map("support_email")
+  supportPhone       String? @map("support_phone")
+  accountManager     String? @map("account_manager")
+  emergencySupport   String? @map("emergency_support")
+  customerSupportUrl String? @map("customer_support_url")
+  // Shown on the login page (once their email domain matches this org) and
+  // in the topbar/workspace picker once logged in. A URL to an image the
+  // browser can load directly — either a path served by this backend (see
+  // ATTACHMENTS_DIR-style static hosting) or an external URL.
+  logoUrl            String? @map("logo_url")
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("org_settings")
+}
+
+// Customer admins can manage that org's users/notes visibility scope in future;
+// viewers have read + note/approval actions only. Support agents work tickets;
+// support managers get the same access for now (kept distinct for future gating).
+enum UserRole {
+  CUSTOMER_ADMIN
+  CUSTOMER_VIEWER
+  SUPPORT_AGENT
+  SUPPORT_MANAGER
+}
+
+model User {
+  id           String    @id @default(uuid())
+  orgId        String    @map("org_id")
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  name         String
+  initials     String
+  role         UserRole
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  org Org @relation(fields: [orgId], references: [id])
+
+  ticketsRequested   Ticket[]       @relation("TicketRequestor")
+  ticketsAssigned    Ticket[]       @relation("TicketAssignee")
+  ticketNotes        TicketNote[]
+  ticketAttachments  TicketAttachment[]
+  changeHistoryItems ChangeHistory[]
+  statusReports      StatusReport[]
+  statusReportUploads StatusReportUpload[]
+  notifications      Notification[]
+  auditLogEntries    AuditLog[]
+
+  @@index([orgId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Projects & Initiatives
+// ---------------------------------------------------------------------------
+
+enum ProjectHealth {
+  ON_TRACK
+  AT_RISK
+  OFF_TRACK
+}
+
+model Project {
+  id            String        @id @default(uuid())
+  orgId         String        @map("org_id")
+  name          String
+  pm            String
+  health        ProjectHealth @default(ON_TRACK)
+  progress      Int           @default(0)
+  phase         String
+  lastUpdate    DateTime      @default(now()) @map("last_update")
+  lastUpdatedById String?     @map("last_updated_by_id") // who uploaded the most recent plan
+  openRiskCount Int           @default(0) @map("open_risk_count")
+  openIssueCount Int          @default(0) @map("open_issue_count")
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  org           Org            @relation(fields: [orgId], references: [id])
+  initiatives   Initiative[]
+  statusReports StatusReport[]
+  tasks         ProjectTask[]
+
+  @@index([orgId])
+  @@map("projects")
+}
+
+// Parsed from the uploaded Excel project-plan template — one row per task,
+// grouped by phase (phase name repeats on the first task of each phase in
+// the source sheet; we forward-fill it when parsing so every row here has
+// its phase set).
+model ProjectTask {
+  id              String    @id @default(uuid())
+  projectId       String    @map("project_id")
+  phase           String
+  taskName        String    @map("task_name")
+  owner           String    // "Customer" | "Doyensys" — kept as free text to match the template rather than a rigid enum
+  startDate       DateTime? @map("start_date")
+  endDate         DateTime? @map("end_date")
+  percentComplete Float     @default(0) @map("percent_complete") // 0.0–1.0, matches the template's fraction
+  sortOrder       Int       @default(0) @map("sort_order")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("project_tasks")
+}
+
+model Initiative {
+  id        String   @id @default(uuid())
+  projectId String   @map("project_id")
+  date      DateTime
+  title     String
+  sub       String?
+  done      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("initiatives")
+}
+
+// ---------------------------------------------------------------------------
+// Tickets — shared base table pattern (Incident / Request / Change)
+// ---------------------------------------------------------------------------
+
+enum TicketType {
+  INCIDENT
+  REQUEST
+  CHANGE
+}
+
+enum TicketStatus {
+  RAISED
+  RESPONDED
+  IN_PROGRESS
+  WAITING_ON_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum Priority {
+  P1
+  P2
+  P3
+  P4
+}
+
+// Change requests use `stage` (ChangeStage) instead of `status`.
+// PROD_APPROVAL intentionally omitted — confirmed unused/dead in the
+// source prototype and dropped per product decision.
+enum ChangeStage {
+  RAISED
+  CUSTOMER_APPROVAL
+  DEV
+  DEV_REVIEW
+  TEST
+  TEST_REVIEW
+  PROD
+  RESOLVED
+  CLOSED
+}
+
+enum ChangeRisk {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Ticket {
+  id          String        @id @default(uuid())
+  number      Int           @unique @default(autoincrement()) @map("number") // drives the human-readable code (INC000101 etc.) — separate from the UUID primary key
+  orgId       String        @map("org_id")
+  type        TicketType
+  title       String
+  description String
+  priority    Priority
+  status      TicketStatus? // null for CHANGE tickets — they use ChangeDetail.stage
+  category    String?       // incidents: Access/Application/etc. requests: request type
+  requestorId String        @map("requestor_id")
+  assigneeId  String?       @map("assignee_id")
+
+  responseSlaDueAt   DateTime? @map("response_sla_due_at")
+  resolutionSlaDueAt DateTime? @map("resolution_sla_due_at")
+  slaBreached        Boolean   @default(false) @map("sla_breached")
+  slaPausedAt        DateTime? @map("sla_paused_at") // set when status = WAITING_ON_CUSTOMER
+  resolvedAt         DateTime? @map("resolved_at") // first time status/stage reached RESOLVED or CLOSED; cleared on reopen. Drives closed-ticket trend charts.
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org         Org      @relation(fields: [orgId], references: [id])
+  requestor   User     @relation("TicketRequestor", fields: [requestorId], references: [id])
+  assignee    User?    @relation("TicketAssignee", fields: [assigneeId], references: [id])
+  notes       TicketNote[]
+  events      TicketEvent[]
+  attachments TicketAttachment[]
+  changeDetail ChangeDetail?
+
+  @@index([orgId, type])
+  @@index([requestorId])
+  @@index([assigneeId])
+  @@map("tickets")
+}
+
+enum NoteVisibility {
+  CUSTOMER
+  INTERNAL
+}
+
+model TicketNote {
+  id         String         @id @default(uuid())
+  ticketId   String         @map("ticket_id")
+  authorId   String         @map("author_id")
+  visibility NoteVisibility @default(CUSTOMER)
+  body       String
+  createdAt  DateTime       @default(now()) @map("created_at")
+
+  ticket      Ticket             @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author      User               @relation(fields: [authorId], references: [id])
+  attachments TicketAttachment[]
+
+  @@index([ticketId])
+  @@map("ticket_notes")
+}
+
+// Timeline / activity feed shown on the "Activity Timeline" tab.
+// Distinct from AuditLog (which is the compliance/security trail) —
+// this is the customer-facing narrative of what happened on a ticket.
+model TicketEvent {
+  id        String   @id @default(uuid())
+  ticketId  String   @map("ticket_id")
+  eventText String   @map("event_text")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@map("ticket_events")
+}
+
+// Attachments can hang off a ticket directly (e.g. attached at creation)
+// or off a specific note (e.g. evidence attached to an update).
+model TicketAttachment {
+  id           String   @id @default(uuid())
+  ticketId     String   @map("ticket_id")
+  noteId       String?  @map("note_id")
+  uploadedById String   @map("uploaded_by_id")
+  filename     String
+  storedPath   String   @map("stored_path")
+  mimeType     String   @map("mime_type")
+  sizeBytes    Int      @map("size_bytes")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  ticket     Ticket      @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  note       TicketNote? @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  uploadedBy User        @relation(fields: [uploadedById], references: [id])
+
+  @@index([ticketId])
+  @@index([noteId])
+  @@map("ticket_attachments")
+}
+
+// One-to-one extension of Ticket for type=CHANGE
+model ChangeDetail {
+  ticketId        String      @id @map("ticket_id")
+  risk            ChangeRisk
+  justification   String
+  impact          String
+  implementation  String
+  rollback        String
+  stage           ChangeStage @default(RAISED)
+
+  devNotes          String?   @map("dev_notes")
+  devById           String?   @map("dev_by_id")
+  devCompletedAt    DateTime? @map("dev_completed_at")
+
+  testNotes  String?   @map("test_notes")
+  testById   String?   @map("test_by_id")
+  testCompletedAt DateTime? @map("test_completed_at")
+
+  prodNotes    String?   @map("prod_notes")
+  deployedById String?   @map("deployed_by_id")
+  deployedAt   DateTime? @map("deployed_at")
+
+  ticket  Ticket          @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  history ChangeHistory[]
+
+  @@map("change_details")
+}
+
+model ChangeHistory {
+  id        String   @id @default(uuid())
+  changeId  String   @map("change_id")
+  stage     String   // label at time of transition, e.g. "Customer Approval"
+  byId      String   @map("by_id")
+  note      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  change ChangeDetail @relation(fields: [changeId], references: [ticketId], onDelete: Cascade)
+  by     User         @relation(fields: [byId], references: [id])
+
+  @@index([changeId])
+  @@map("change_history")
+}
+
+// ---------------------------------------------------------------------------
+// Status Reports
+// ---------------------------------------------------------------------------
+
+enum StatusReportType {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum HealthRating {
+  ON_TRACK
+  STABLE
+  GOOD
+  AT_RISK
+  OFF_TRACK
+}
+
+model StatusReport {
+  id        String           @id @default(uuid())
+  orgId     String           @map("org_id")
+  projectId String           @map("project_id")
+  type      StatusReportType
+  period    String // display string, e.g. "Aug 25 – Sep 1, 2026"
+  periodStart DateTime       @map("period_start")
+  periodEnd   DateTime       @map("period_end")
+  authorId  String           @map("author_id")
+  summary   String
+
+  healthOverall  HealthRating @map("health_overall")
+  healthSchedule HealthRating @map("health_schedule")
+  healthBudget   HealthRating @map("health_budget")
+  healthScope    HealthRating @map("health_scope")
+  healthQuality  HealthRating @map("health_quality")
+
+  itsmOpenIncidents Int    @default(0) @map("itsm_open_incidents")
+  itsmOpenRequests  Int    @default(0) @map("itsm_open_requests")
+  itsmChanges       Int    @default(0) @map("itsm_changes")
+  itsmSlaPerf       String @map("itsm_sla_perf") // display string e.g. "98%"
+
+  isPublished Boolean   @default(false) @map("is_published")
+  publishedAt DateTime? @map("published_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  org     Org     @relation(fields: [orgId], references: [id])
+  project Project @relation(fields: [projectId], references: [id])
+  author  User    @relation(fields: [authorId], references: [id])
+
+  listItems  StatusReportListItem[]
+  risks      StatusReportRisk[]
+  issues     StatusReportIssue[]
+  milestones StatusReportMilestone[]
+
+  @@index([orgId, type, periodStart])
+  @@map("status_reports")
+}
+
+// Covers completed / inProgress / planned / upcoming / customerActions —
+// same shape (an ordered bullet list), differing only by `section`.
+enum ReportSection {
+  COMPLETED
+  IN_PROGRESS
+  PLANNED
+  UPCOMING
+  CUSTOMER_ACTIONS
+}
+
+model StatusReportListItem {
+  id       String        @id @default(uuid())
+  reportId String        @map("report_id")
+  section  ReportSection
+  text     String
+  sortOrder Int          @default(0) @map("sort_order")
+
+  report StatusReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, section])
+  @@map("status_report_list_items")
+}
+
+model StatusReportRisk {
+  id          String @id @default(uuid())
+  reportId    String @map("report_id")
+  description String
+  impact      String
+  probability String
+  mitigation  String
+  owner       String
+
+  report StatusReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@map("status_report_risks")
+}
+
+model StatusReportIssue {
+  id         String @id @default(uuid())
+  reportId   String @map("report_id")
+  issue      String
+  impact     String
+  resolution String
+  owner      String
+  targetDate String @map("target_date")
+
+  report StatusReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@map("status_report_issues")
+}
+
+model StatusReportMilestone {
+  id       String   @id @default(uuid())
+  reportId String   @map("report_id")
+  date     DateTime
+  label    String
+
+  report StatusReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@map("status_report_milestones")
+}
+
+// ---------------------------------------------------------------------------
+// File-based Status Reports — support uploads a complete, self-contained
+// HTML report (like the branded weekly report template) and it's shown to
+// the customer on the calendar date it applies to. This is the primary way
+// reports get published; the structured StatusReport model above remains
+// available for anyone who wants individually-editable fields instead, but
+// the file-upload flow is what the UI actually drives.
+// ---------------------------------------------------------------------------
+
+model StatusReportUpload {
+  id           String           @id @default(uuid())
+  orgId        String           @map("org_id")
+  type         StatusReportType
+  reportDate   DateTime         @map("report_date") // the calendar day this report represents
+  uploadedById String           @map("uploaded_by_id")
+  filename     String
+  storedPath   String           @map("stored_path")
+  mimeType     String           @map("mime_type")
+  sizeBytes    Int              @map("size_bytes")
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  org        Org  @relation(fields: [orgId], references: [id])
+  uploadedBy User @relation(fields: [uploadedById], references: [id])
+
+  @@unique([orgId, type, reportDate])
+  @@index([orgId, type])
+  @@map("status_report_uploads")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications & Company Updates
+// ---------------------------------------------------------------------------
+
+enum NotificationCategory {
+  TICKET
+  CHANGE
+  REPORT
+  SYSTEM
+}
+
+model Notification {
+  id         String                @id @default(uuid())
+  orgId      String                @map("org_id")
+  userId     String                @map("user_id")
+  title      String
+  sub        String
+  category   NotificationCategory
+  refType    String?               @map("ref_type") // 'ticket' | 'change' | 'status_report'
+  refId      String?               @map("ref_id")
+  isRead     Boolean               @default(false) @map("is_read")
+  emailSentAt DateTime?            @map("email_sent_at")
+  createdAt  DateTime              @default(now()) @map("created_at")
+
+  org  Org  @relation(fields: [orgId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model CompanyUpdate {
+  id        String   @id @default(uuid())
+  title     String
+  desc      String
+  date      DateTime
+  category  String
+  icon      String
+  author    String
+  priority  String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("company_updates")
+}
+
+// ---------------------------------------------------------------------------
+// Audit log — INSERT-only for doyensys_app runtime role
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?  @map("actor_id")
+  orgId      String?  @map("org_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@map("audit_log")
+}
