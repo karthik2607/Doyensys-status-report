@@ -375,7 +375,8 @@ function trendWindows(data: WeeklyReportData, from: Date | null, to: Date | null
   }
 
   const ordered = [...seen.values()].sort((a, b) => a.start.getTime() - b.start.getTime()).slice(-weeks);
-  return ordered.map((w) => ({ label: fmtDay(w.start), start: w.start, end: w.end }));
+  // Label each week by its end date (the Tuesday), not its start.
+  return ordered.map((w) => ({ label: fmtDay(w.end), start: w.start, end: w.end }));
 }
 
 // ---------------------------------------------------------------------------
