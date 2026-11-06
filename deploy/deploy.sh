@@ -27,8 +27,7 @@ npm ci --no-audit --no-fund
 
 echo "==> Prisma generate + migrate"
 npx prisma generate
-set -a; . ./.env; set +a                    # DATABASE_URL for prisma
-npx prisma migrate deploy
+npx prisma migrate deploy                   # prisma reads DATABASE_URL from ./.env itself
 
 echo "==> Building"
 npm run build
