@@ -11,10 +11,15 @@ BRANCH="main"
 PORT="4000"
 
 cd "$APP_DIR"
-echo "==> Pulling latest $BRANCH"
-git fetch --prune origin
-git reset --hard "origin/$BRANCH"
-echo "    now at $(git log -1 --format='%h %s')"
+if [ "${1:-}" != "--pulled" ]; then
+  echo "==> Pulling latest $BRANCH"
+  git fetch --prune origin
+  git reset --hard "origin/$BRANCH"
+  # Re-run the freshly pulled copy of this script (bash reads scripts
+  # lazily, so continuing here could execute a mix of old and new lines).
+  exec bash "$APP_DIR/deploy/deploy.sh" --pulled
+fi
+echo "==> Deploying $(git log -1 --format='%h %s')"
 
 cd "$APP_DIR/backend"
 if [ ! -f .env ]; then
