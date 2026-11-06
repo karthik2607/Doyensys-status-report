@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Runs ON THE SERVER. Called by GitHub Actions after every push to main,
-# or manually:  bash /opt/doyensys-portal/deploy/deploy.sh
+# Runs ON THE SERVER as the `doyensys` user. Called by GitHub Actions after
+# every push to main, or manually:
+#   sudo -iu doyensys bash /opt/doyensys/app/deploy/deploy.sh
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/doyensys-portal}"
-BRANCH="${BRANCH:-main}"
-PM2_NAME="${PM2_NAME:-doyensys-backend}"
-# Optional: folder Nginx serves the frontend HTML from (leave empty to skip)
-FRONTEND_DIR="${FRONTEND_DIR:-}"
+APP_DIR="/opt/doyensys/app"                 # git clone of this repo
+FRONTEND_DIR="/opt/doyensys/public"         # served by python http.server :5000
+SERVICE="doyensys-api"                      # systemd unit running the backend
+BRANCH="main"
+PORT="4000"
 
 cd "$APP_DIR"
 echo "==> Pulling latest $BRANCH"
 git fetch --prune origin
 git reset --hard "origin/$BRANCH"
+echo "    now at $(git log -1 --format='%h %s')"
 
 cd "$APP_DIR/backend"
 if [ ! -f .env ]; then
@@ -21,32 +23,29 @@ if [ ! -f .env ]; then
 fi
 
 echo "==> Installing dependencies"
-npm ci
+npm ci --no-audit --no-fund
 
-echo "==> Prisma generate"
+echo "==> Prisma generate + migrate"
 npx prisma generate
-
-if [ -d prisma/migrations ]; then
-  echo "==> Applying database migrations"
-  npx prisma migrate deploy
-fi
+set -a; . ./.env; set +a                    # DATABASE_URL for prisma
+npx prisma migrate deploy
 
 echo "==> Building"
 npm run build
 
-echo "==> Restarting backend"
-if pm2 describe "$PM2_NAME" >/dev/null 2>&1; then
-  pm2 restart "$PM2_NAME" --update-env
-else
-  pm2 start npm --name "$PM2_NAME" -- start
-fi
-pm2 save
+echo "==> Restarting $SERVICE"
+sudo /usr/bin/systemctl restart "$SERVICE"
 
-if [ -n "$FRONTEND_DIR" ]; then
-  echo "==> Publishing frontend to $FRONTEND_DIR"
-  cp "$APP_DIR/frontend/doyensys-portal-live.html" "$FRONTEND_DIR/index.html"
-fi
+echo "==> Publishing frontend"
+cp "$APP_DIR/frontend/doyensys-portal-live.html" "$FRONTEND_DIR/index.html"
 
 echo "==> Health check"
-sleep 3
-curl -fsS "http://localhost:${PORT:-4000}/health" && echo && echo "Deploy OK"
+for i in $(seq 1 15); do
+  if curl -fsS "http://localhost:$PORT/health" >/dev/null 2>&1; then
+    echo "Deploy OK ($(git -C "$APP_DIR" log -1 --format=%h))"
+    exit 0
+  fi
+  sleep 2
+done
+echo "ERROR: backend did not become healthy. Check: journalctl -u $SERVICE -n 100" >&2
+exit 1
