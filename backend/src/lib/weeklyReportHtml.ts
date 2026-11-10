@@ -117,6 +117,54 @@ function trendBars(labels: string[], series: { name: string; color: string; valu
   return `<svg class="trend-svg" viewBox="0 0 ${W} ${H}" role="img" font-family="Segoe UI, -apple-system, Helvetica Neue, Arial, sans-serif">${grid}${cols}</svg>`;
 }
 
+/**
+ * Multi-series line chart — used for "Received vs Closed". Same canvas, axis
+ * and palette as trendBars; each week sits in the centre of its band, with a
+ * dot, a hover title and the value printed beside the point. Where two series
+ * meet at a week, the higher value is labelled above its dot and the lower one
+ * below, so the numbers never sit on top of each other.
+ */
+function trendLines(labels: string[], series: { name: string; color: string; values: number[] }[]): string {
+  const W = 560, H = 260, padL = 40, padR = 18, padT = 26, padB = 40;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = labels.length;
+  if (!n) return '';
+  const max = Math.max(1, ...series.flatMap((s) => s.values));
+  const step = Math.max(1, Math.ceil(max / 3));
+  const niceMax = step * 3;
+  const bandW = plotW / n;
+  const x = (i: number) => padL + bandW * i + bandW / 2;
+  const y = (v: number) => padT + plotH - (v / niceMax) * plotH;
+
+  const grid = [0, 1, 2, 3].map((k) => {
+    const v = step * k, gy = y(v);
+    return `<line x1="${padL}" x2="${W - padR}" y1="${gy.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="${k === 0 ? '#C9CCD2' : '#ECEDEF'}" stroke-width="1"/>`
+      + `<text x="${padL - 8}" y="${gy.toFixed(1)}" dy="3.5" text-anchor="end" font-size="11" fill="#9AA0AC">${v}</text>`;
+  }).join('');
+
+  const labs = labels.map((lab, i) =>
+    `<text x="${x(i).toFixed(1)}" y="${H - 20}" text-anchor="middle" font-size="11" fill="#6B7078">${esc(lab)}</text>`).join('');
+
+  const paths = series.map((s) => {
+    const d = s.values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v || 0).toFixed(1)}`).join(' ');
+    return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join('');
+
+  const dots = series.map((s) => s.values.map((v, i) =>
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(v || 0).toFixed(1)}" r="4.5" fill="${s.color}" stroke="#fff" stroke-width="2"><title>${esc(s.name)} — ${esc(labels[i])}: ${v || 0}</title></circle>`).join('')).join('');
+
+  const vals = series.map((s, si) => s.values.map((v, i) => {
+    const val = v || 0;
+    // Above the dot unless another series is higher at this week (ties: the
+    // first series goes above, the rest below).
+    const below = series.some((o, oi) => oi !== si && ((o.values[i] || 0) > val || ((o.values[i] || 0) === val && oi < si)));
+    const ty = below ? y(val) + 18 : y(val) - 10;
+    return `<text x="${x(i).toFixed(1)}" y="${ty.toFixed(1)}" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1B1F27" paint-order="stroke" stroke="#fff" stroke-width="3" stroke-linejoin="round">${val}</text>`;
+  }).join('')).join('');
+
+  return `<svg class="trend-svg" viewBox="0 0 ${W} ${H}" role="img" font-family="Segoe UI, -apple-system, Helvetica Neue, Arial, sans-serif">${grid}${labs}${paths}${dots}${vals}</svg>`;
+}
+
 function trendLine(labels: string[], values: number[], color: string): string {
   const W = 560, H = 260, padL = 40, padR = 18, padT = 26, padB = 40;
   const plotW = W - padL - padR, plotH = H - padT - padB;
@@ -536,7 +584,7 @@ export function renderWeeklyReportHtml(data: WeeklyReportData): string {
 
     return `<div class="trend-track"><div class="trend-track-hd">${esc(tr)} Track</div><div class="trend-grid">`
       + `<div class="trend-card reveal"><h4>${esc(tr)} Track – Received vs Closed</h4><div class="trend-legend"><span><i style="background:${RECEIVED}"></i>#Tickets received</span><span><i style="background:${RESOLVED}"></i>#Tickets resolved</span></div>`
-      + trendBars(labels, [{ name: 'received', color: RECEIVED, values: recv }, { name: 'resolved', color: RESOLVED, values: clos }])
+      + trendLines(labels, [{ name: '#Tickets received', color: RECEIVED, values: recv }, { name: '#Tickets resolved', color: RESOLVED, values: clos }])
       + `</div><div class="trend-card reveal"><h4>${esc(tr)} Track – Carry Forward</h4><div class="trend-legend"><span><i style="background:${CARRY}"></i>Carry forward</span></div>`
       + trendLine(labels, carry, CARRY) + `</div></div></div>`;
   }).join('');
