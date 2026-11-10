@@ -36,13 +36,18 @@ function titleRow(ws: ExcelJS.Worksheet, text: string, span: number) {
   row.height = 24;
 }
 
+/** Said on every data sheet: the generator never turns an empty cell into 0. */
+const EMPTY_NOT_ZERO = 'NOTE: Leaving a cell empty is NOT taken as zero — an empty cell is left blank in the report and is never counted as 0. Type 0 if you mean zero.';
+
 function helpRow(ws: ExcelJS.Worksheet, text: string, span: number) {
-  const row = ws.addRow([text]);
+  const row = ws.addRow([`${text}\n${EMPTY_NOT_ZERO}`]);
   ws.mergeCells(row.number, 1, row.number, span);
   const cell = row.getCell(1);
   cell.font = { italic: true, size: 10, color: { argb: 'FF6B7280' } };
   cell.alignment = { vertical: 'middle', indent: 1, wrapText: true };
-  row.height = 30;
+  // Room for the sheet's own help plus the empty-cell note. Long help text on
+  // a narrow sheet wraps onto more lines, so size by length.
+  row.height = Math.min(150, 30 + Math.ceil(text.length / 110) * 14);
 }
 
 function headerRow(ws: ExcelJS.Worksheet, headers: string[]) {
@@ -103,6 +108,10 @@ export async function buildWeeklyReportTemplate(opts?: { customer?: string }): P
   titleRow(readme, 'Doyensys — Weekly Status Report Template', 1);
   [
     '',
+    'EMPTY CELLS ARE NOT ZERO',
+    'Leaving a cell empty is NOT taken as zero, on any sheet. An empty cell is left blank in the report — it is',
+    'never counted, charted or totalled as 0. If the figure really is zero, type 0.',
+    '',
     'HOW TO USE THIS FILE',
     '1. Fill in every sheet that applies. Blank sheets are simply left out of the report.',
     '2. Columns with a dropdown must use the dropdown — typing your own value will be rejected by Excel.',
@@ -149,7 +158,9 @@ export async function buildWeeklyReportTemplate(opts?: { customer?: string }): P
     'Tickets ............ One row per ticket. Drives this week’s numbers, tables and the written detail.',
     'Weekly Counts ...... One row per week per track. Supplies the trend charts for weeks with no ticket',
     '                     detail, and supplies Carryforward for EVERY week.',
-    'Project Hours ...... Hours spent per track, per month. Drives the project hours charts.',
+    'Project Hours ...... Hours per track. Aug–Oct 2026 are pre-filled monthly rows; from November 2026 add one row',
+    '                     per track per week (Week Start / Week End). Months are running totals of their weeks; the',
+    '                     report shows the last three months and this week’s rows in the weekly summary.',
     'Activities ......... The written updates per track (Closed / WIP / On-Hold / Others / Updates / Recommendations).',
     'Value Additions .... Initiatives and improvements delivered outside of ticket work.',
     'Project Updates .... Status of ongoing projects.',
@@ -367,7 +378,7 @@ export async function buildWeeklyReportTemplate(opts?: { customer?: string }): P
     { width: 8 }, { width: 8 }, { width: 9 }, { width: 15 },
   ];
   titleRow(counts, 'Weekly Counts — ONLY for weeks with no ticket-level data', countHeaders.length);
-  helpRow(counts, 'This sheet is for the older weeks where no ticket export exists. Do NOT fill it in for a week that has a section on the Tickets sheet — that week is counted from its tickets, and a row here for it is redundant. Fill one row per track for each counts-only week; the six most recent weeks across both sheets are charted. The reporting week runs Wednesday to Tuesday, and Carryforward is typed, never calculated.', countHeaders.length);
+  helpRow(counts, 'This sheet is for the older weeks where no ticket export exists. Do NOT fill it in for a week that has a section on the Tickets sheet — that week is counted from its tickets, and a row here for it is redundant. Fill one row per track for each counts-only week; the eight most recent weeks across both sheets are charted. The reporting week runs Wednesday to Tuesday, and Carryforward is typed, never calculated.', countHeaders.length);
   headerRow(counts, countHeaders);
   const countsFirst = counts.rowCount + 1;
   addDropdown(counts, 'C', countsFirst, TRACKS);
@@ -394,17 +405,35 @@ export async function buildWeeklyReportTemplate(opts?: { customer?: string }): P
   counts.views = [{ state: 'frozen', ySplit: 3, xSplit: 3 }];
 
   // --------------------------------------------------------- Project Hours
+  // Two kinds of row: MONTHLY history rows (Month filled, no week dates) and,
+  // from November 2026, WEEKLY rows (Week Start + Week End filled). A month's
+  // figure is the running total of its weekly rows; a week counts toward the
+  // month its Week End (the Tuesday) falls in. The report shows the last three
+  // months. Aug–Oct 2026 come pre-filled as monthly rows — keep them.
   const hours = wb.addWorksheet('Project Hours');
-  const hoursHeaders = ['Track', 'Activity', 'Hours', 'Month'];
-  hours.columns = [{ width: 16 }, { width: 52 }, { width: 10 }, { width: 14 }];
+  const hoursHeaders = ['Track', 'Activity', 'Hours', 'Month', 'Week Start', 'Week End'];
+  hours.columns = [{ width: 16 }, { width: 52 }, { width: 10 }, { width: 14 }, { width: 14 }, { width: 14 }];
   titleRow(hours, 'Project Hours', hoursHeaders.length);
-  helpRow(hours, 'Hours spent on project (non-ticket) work. Month drives the "Project Hours by Month" chart — use a format like Oct-2026.', hoursHeaders.length);
+  helpRow(hours, 'Hours spent on project (non-ticket) work. MONTHLY rows (Aug-2026 to Oct-2026, already filled in — keep them): fill Month, leave the week dates empty. From November 2026 add one WEEKLY row per track per week: fill Week Start and Week End (Wednesday to Tuesday) and leave Month empty — the week counts toward the month its Week End falls in, and each month is the running total of its weeks. The report shows the last three months, and the weekly summary shows only the rows for the week being reported.', hoursHeaders.length);
   headerRow(hours, hoursHeaders);
   const hoursFirst = hours.rowCount + 1;
   addDropdown(hours, 'A', hoursFirst, TRACKS);
-  hours.addRow(['Applications', 'EXAMPLE - Magento', 8, 'Oct-2026']);
-  hours.addRow(['Applications', 'EXAMPLE - Nimble', 4, 'Oct-2026']);
-  hours.addRow(['Infra', 'EXAMPLE - Azure API', 8, 'Oct-2026']);
+  // Month is text ("Aug-2026") — stop Excel turning it into a date.
+  hours.getColumn('D').numFmt = '@';
+  dateFormat(hours, 'E', hoursFirst);
+  dateFormat(hours, 'F', hoursFirst);
+  // Fixed monthly history. DBA for Sep-2026 is deliberately empty: no figure
+  // was recorded, and an empty cell is shown blank, not as 0.
+  ([
+    ['Applications', 40, 'Aug-2026'], ['Infra', 33, 'Aug-2026'], ['DBA', 0, 'Aug-2026'],
+    ['Applications', 52, 'Sep-2026'], ['Infra', 10, 'Sep-2026'], ['DBA', null, 'Sep-2026'],
+    ['Applications', 0, 'Oct-2026'], ['Infra', 12, 'Oct-2026'], ['DBA', 0, 'Oct-2026'],
+  ] as [string, number | null, string][]).forEach(([track, h, month]) => {
+    hours.addRow([track, 'Monthly total', h, month]);
+  });
+  // How a weekly row looks (skipped on import because of the EXAMPLE marker).
+  const ex = hours.addRow(['Infra', 'EXAMPLE - Onboarding and Offboarding Changes', 12, '', new Date('2026-11-04'), new Date('2026-11-10')]);
+  ex.eachCell((cell) => { cell.font = { italic: true, size: 10, color: { argb: 'FF9AA0AC' } }; });
 
   // ------------------------------------------------------------ Activities
   const acts = wb.addWorksheet('Activities');

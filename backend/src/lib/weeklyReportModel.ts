@@ -319,11 +319,64 @@ export interface WeeklyCountRow {
   carryForward: number | null;
 }
 
+/**
+ * One row of the Project Hours sheet. Two kinds of row live on that sheet:
+ *
+ *   • MONTHLY rows (Month filled, no week dates) — a whole month's hours typed
+ *     in one go. Used for the history before weekly entry began (Aug–Oct 2026).
+ *   • WEEKLY rows (Week Start + Week End filled) — one reporting week's hours.
+ *     A month's figure is the running total of its weekly rows, and the week
+ *     belongs to the month its end date (the Tuesday) falls in.
+ *
+ * `hours` is null when the cell was left empty: empty is never read as zero.
+ */
 export interface ProjectHoursRow {
   track: Track;
   activity: string;
-  hours: number;
-  month: string;
+  hours: number | null;
+  /** Calendar month the row counts toward, as "YYYY-MM"; null if unknown. */
+  monthKey: string | null;
+  weekStart: Date | null;
+  weekEnd: Date | null;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "YYYY-MM" for the month a date falls in (UTC). */
+export function monthKeyOf(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+/** "2026-08" -> "Aug-26", the label the report uses. */
+export function monthLabel(key: string): string {
+  const [y, m] = key.split('-').map(Number);
+  return `${MONTHS[m - 1]}-${String(y).slice(-2)}`;
+}
+
+/** The month `n` months before/after a "YYYY-MM" key. */
+export function shiftMonth(key: string, n: number): string {
+  const [y, m] = key.split('-').map(Number);
+  const t = y * 12 + (m - 1) + n;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, '0')}`;
+}
+
+/** Reads a typed month — "Aug-26", "Aug-2026", "August 2026", "2026-08",
+ * "08/2026" — into a "YYYY-MM" key. Returns null if it can't be read. */
+export function parseMonthText(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  let m = /^([A-Za-z]{3,9})[\s\-\/']*(\d{2}|\d{4})$/.exec(s);
+  if (m) {
+    const idx = MONTHS.findIndex((x) => x.toLowerCase() === m![1].slice(0, 3).toLowerCase());
+    if (idx < 0) return null;
+    const y = m[2].length === 2 ? 2000 + Number(m[2]) : Number(m[2]);
+    return `${y}-${String(idx + 1).padStart(2, '0')}`;
+  }
+  m = /^(\d{4})[\-\/](\d{1,2})$/.exec(s);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}`;
+  m = /^(\d{1,2})[\-\/](\d{4})$/.exec(s);
+  if (m) return `${m[2]}-${m[1].padStart(2, '0')}`;
+  return null;
 }
 
 export interface ActivityRow {

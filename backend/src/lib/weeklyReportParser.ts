@@ -4,6 +4,7 @@ import {
   normalizePriority, normalizeStatus, normalizeTrack, guessTrackFromModule, Track,
   normalizeReportCategory, ContactRow, Workstream, WORKSTREAMS,
   WeeklyCountRow, TicketSection, ReportWindow, WEEK_START_DAY, utcDay, fmtISO,
+  monthKeyOf, parseMonthText,
 } from './weeklyReportModel';
 
 // ===========================================================================
@@ -354,15 +355,39 @@ function parseProjectHours(wb: ExcelJS.Workbook): ProjectHoursRow[] {
   if (!hdr) return [];
   const m = hdr.map;
   const cTrack = pick(m, ['Track']), cAct = pick(m, ['Activity', 'Key Activities']), cHrs = pick(m, ['Hours', '# Hours']), cMon = pick(m, ['Month', 'Period']);
+  const cStart = pick(m, ['Week Start', 'Start Date', 'Start']), cEnd = pick(m, ['Week End', 'End Date', 'End']);
   const out: ProjectHoursRow[] = [];
   for (let r = hdr.rowNumber + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
     const track = normalizeTrack(cellText(cTrack ? row.getCell(cTrack).value : ''));
+    // Empty stays null — an empty Hours cell is not a zero.
     const hours = cellNumber(cHrs ? row.getCell(cHrs).value : null);
     const activity = norm(cellText(cAct ? row.getCell(cAct).value : ''));
-    if (!track || (hours === null && !activity)) continue;
     if (isExample(activity)) continue;
-    out.push({ track, activity: activity || '—', hours: hours ?? 0, month: norm(cellText(cMon ? row.getCell(cMon).value : '')) || '—' });
+    const weekStart = cStart ? cellDate(row.getCell(cStart).value) : null;
+    const weekEnd = cEnd ? cellDate(row.getCell(cEnd).value) : null;
+
+    // Month: a weekly row belongs to the month its END date falls in; a
+    // monthly row uses the Month column (typed text or an Excel date).
+    let monthKey: string | null = null;
+    if (weekEnd) monthKey = monthKeyOf(utcDay(weekEnd));
+    else if (cMon) {
+      const mv = row.getCell(cMon).value;
+      const asDate = mv instanceof Date ? mv : null;
+      monthKey = asDate ? monthKeyOf(asDate) : parseMonthText(cellText(mv));
+    }
+
+    // A row needs a track and something to say: hours, an activity, or at
+    // least a month/week (a deliberately blank figure for that period).
+    if (!track || (hours === null && !activity && !monthKey)) continue;
+    out.push({
+      track,
+      activity: activity || '—',
+      hours,
+      monthKey,
+      weekStart: weekStart ? utcDay(weekStart) : null,
+      weekEnd: weekEnd ? utcDay(weekEnd) : null,
+    });
   }
   return out;
 }

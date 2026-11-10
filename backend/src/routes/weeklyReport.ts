@@ -98,7 +98,7 @@ export async function weeklyReportRoutes(app: FastifyInstance) {
           weeklyCountRows: data.weeklyCounts.length,
           trendWeeks: new Set(data.weeklyCounts.map((c) => c.weekStart.getTime())).size,
           activities: data.activities.length,
-          projectHours: data.projectHours.reduce((s, r) => s + r.hours, 0),
+          projectHours: data.projectHours.reduce((s, r) => s + (r.hours ?? 0), 0),   // preview count only; empty cells add nothing
           actionItems: data.actionItems.length,
         },
       });
