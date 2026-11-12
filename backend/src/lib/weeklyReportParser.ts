@@ -499,18 +499,66 @@ function parseActivities(wb: ExcelJS.Workbook): ActivityRow[] {
   const cWs = pick(m, ['Workstream', 'Track']);
   const cSec = pick(m, ['Section']);
   const cDet = pick(m, ['Detail', 'Details', 'Description']);
-  const cParent = pick(m, ['Sub-bullet of', 'Sub bullet of', 'Parent']);
-  const out: ActivityRow[] = [];
+  const cSub = pick(m, ['Sub-bullet', 'Sub bullet', 'Sub-bullet of', 'Sub bullet of', 'Parent']);
+
+  // Each row is "main bullet | sub-bullet". The sub-bullet column is
+  // optional; repeating the same main bullet on several rows (or leaving it
+  // blank under a row with the same workstream/section) adds more sub-bullets
+  // under it. Older templates used the column the other way round ("Sub-bullet
+  // of" = text of the parent bullet); a row whose sub-bullet text exactly
+  // matches another main bullet in the same panel is read that way instead.
+  type Raw = { workstream: ActivityRow['workstream']; section: string; detail: string; sub: string };
+  const raws: Raw[] = [];
+  let last: Raw | null = null;
   for (let r = hdr.rowNumber + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const workstream = normalizeWorkstream(cellText(cWs ? row.getCell(cWs).value : ''));
-    const detail = norm(cellText(cDet ? row.getCell(cDet).value : ''));
-    if (!workstream || !detail) continue;
-    if (isExample(detail)) continue;
-    const parent = cParent ? norm(cellText(row.getCell(cParent).value)) : '';
-    out.push({ workstream, section: normalizeSection(cSec ? row.getCell(cSec).value : ''), detail, parent: parent || undefined });
+    let workstream = normalizeWorkstream(cellText(cWs ? row.getCell(cWs).value : ''));
+    const secRaw = cSec ? norm(cellText(row.getCell(cSec).value)) : '';
+    let detail = norm(cellText(cDet ? row.getCell(cDet).value : ''));
+    const sub = cSub ? norm(cellText(row.getCell(cSub).value)) : '';
+    if (!detail && !sub) continue;
+    if (isExample(detail, sub)) continue;
+    let section = normalizeSection(secRaw);
+    if (!detail) {
+      // Sub-bullet only: belongs to the bullet on the row above.
+      if (!last) continue;
+      detail = last.detail;
+      workstream = workstream || last.workstream;
+      if (!secRaw) section = last.section;
+    }
+    if (!workstream) continue;
+    last = { workstream, section, detail, sub };
+    raws.push(last);
   }
-  return out;
+
+  const key = (s: string) => s.toLowerCase();
+  const panelKey = (x: Raw) => `${x.workstream}|${x.section}`;
+  const mains = new Map<string, Set<string>>();
+  for (const x of raws) {
+    if (!mains.has(panelKey(x))) mains.set(panelKey(x), new Set());
+    mains.get(panelKey(x))!.add(key(x.detail));
+  }
+
+  const out: ActivityRow[] = [];
+  const seenTop = new Set<string>();
+  const addTop = (x: Raw, text: string) => {
+    const k = `${panelKey(x)}|${key(text)}`;
+    if (seenTop.has(k)) return;
+    seenTop.add(k);
+    out.push({ workstream: x.workstream, section: x.section, detail: text });
+  };
+  for (const x of raws) {
+    const legacyParent = x.sub && key(x.sub) !== key(x.detail) && mains.get(panelKey(x))!.has(key(x.sub));
+    if (legacyParent) {
+      out.push({ workstream: x.workstream, section: x.section, detail: x.detail, parent: x.sub });
+      continue;
+    }
+    addTop(x, x.detail);
+    if (x.sub) out.push({ workstream: x.workstream, section: x.section, detail: x.sub, parent: x.detail });
+  }
+  // A legacy child must not also appear as a main bullet.
+  const kids = new Set(out.filter((o) => o.parent).map((o) => `${o.workstream}|${o.section}|${key(o.detail)}`));
+  return out.filter((o) => o.parent || !kids.has(`${o.workstream}|${o.section}|${key(o.detail)}`));
 }
 
 function parseContacts(wb: ExcelJS.Workbook): ContactRow[] {

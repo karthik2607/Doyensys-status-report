@@ -247,12 +247,14 @@ const show = (v: Val | undefined) => (v === null || v === undefined ? '' : Strin
  * becomes a nested <ul class="sub-list"> under it — the indented bullets in
  * the source report. */
 function bulletList(rows: { text: string; parent?: string }[]): string {
-  const tops = rows.filter((r) => !r.parent);
-  if (!tops.length && rows.length) {
-    return `<ul class="update-list">${rows.map((r) => `<li>${esc(r.text)}</li>`).join('')}</ul>`;
-  }
+  const k = (s: string) => s.trim().toLowerCase();
+  const texts = new Set(rows.filter((r) => !r.parent).map((r) => k(r.text)));
+  // A sub-bullet whose parent isn't in this panel is shown as a bullet of its
+  // own rather than disappearing.
+  const tops = rows.filter((r) => !r.parent || !texts.has(k(r.parent)));
   return `<ul class="update-list">${tops.map((t) => {
-    const kids = rows.filter((r) => r.parent && r.parent.trim().toLowerCase() === t.text.trim().toLowerCase());
+    if (t.parent) return `<li>${esc(t.text)}</li>`;
+    const kids = rows.filter((r) => r.parent && k(r.parent) === k(t.text));
     const sub = kids.length ? `<ul class="sub-list">${kids.map((k) => `<li>${esc(k.text)}</li>`).join('')}</ul>` : '';
     return `<li>${esc(t.text)}${sub}</li>`;
   }).join('')}</ul>`;
